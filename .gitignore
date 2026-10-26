@@ -1,0 +1,12 @@
+node_modules
+dist
+.env
+.DS_Store
+
+# Local PrepForge backups
+src/main-old.jsx
+src/styles-old.css
+src/prepforge-main-v1.1.jsx
+src/prepforge-styles-v1.1.css
+*.backup
+src/main.backup.jsx
