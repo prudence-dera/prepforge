@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
+    "compromise": "^14.20.0",
     "lucide-react": "latest",
     "mammoth": "^1.13.0",
     "pdfjs-dist": "^6.5.438",

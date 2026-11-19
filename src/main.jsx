@@ -10,6 +10,7 @@ import './styles.css';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import mammoth from 'mammoth';
+import nlp from 'compromise';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -253,19 +254,236 @@ const weakResumePhrases = ['responsible for', 'helped with', 'worked on', 'assis
 function resumeHasSkill(text, skill) {
   const aliases = resumeSkillAliases[skill] || [skill.toLowerCase()];
   const normalized = text.toLowerCase();
-  return aliases.some(alias => normalized.includes(alias.toLowerCase()));
+
+  return aliases.some(alias => {
+    const escaped = alias
+      .toLowerCase()
+      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    const pattern = new RegExp(
+      `(^|[^a-z0-9+#])${escaped}(?=$|[^a-z0-9+#])`,
+      'i'
+    );
+
+    return pattern.test(normalized);
+  });
 }
 
-function analyzeResumeText(text, targetRole) {
+const jobStopWords = new Set([
+  'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into',
+  'your', 'you', 'our', 'are', 'will', 'have', 'has', 'had',
+  'job', 'role', 'work', 'working', 'team', 'including',
+  'required', 'preferred', 'qualification', 'qualifications',
+  'experience', 'years', 'ability', 'skills', 'strong',
+  'responsibilities', 'responsibility', 'position',
+  'like', 'high', 'often', 'typically', 'through', 'ongoing',
+  'accurate', 'timely', 'related', 'field', 'assets'
+]);
+
+function extractJobKeywords(text) {
+  const words = text
+    .toLowerCase()
+    .replace(/[^a-z0-9+#&/\-\s]+/g, ' ')
+    .split(/\s+/)
+    .filter(word =>
+      word.length >= 3 &&
+      !jobStopWords.has(word) &&
+      !/^\d+$/.test(word)
+    );
+
+  const counts = {};
+
+  words.forEach(word => {
+    counts[word] = (counts[word] || 0) + 1;
+  });
+
+  return Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 20)
+    .map(([word]) => word);
+}
+
+const jobPhraseEdgeWords = new Set([
+  'the', 'a', 'an', 'and', 'each', 'all', 'other',
+  'their', 'our', 'your', 'this', 'that',
+  'these', 'those', 'certain', 'relevant',
+  'future', 'entire'
+]);
+const jobPhraseNoiseWords = new Set([
+  'you', 'll', 'we', 'us',
+  'position', 'remote', 'team',
+  'environment', 'growing',
+  'company', 'organization',
+  'employee', 'employees',
+  'manager', 'managers',
+  'operations',
+  'accountability', 'performance', 'expectations',
+  'coaching', 'opportunities', 'professional',
+  'growth', 'oriented', 'environment', 'clear'
+]);
+
+
+function extractJobPhrases(text) {
+  const nounPhrases = nlp(text)
+    .nouns()
+    .out('array')
+    .map(phrase => {
+      const words = phrase
+        .toLowerCase()
+        .replace(/[^a-z0-9+#&/.\-\s]+/g, ' ')
+        .split(/\s+/)
+        .filter(Boolean)
+        .filter(word => word !== 's');
+
+      while (words.length && jobPhraseEdgeWords.has(words[0])) {
+        words.shift();
+      }
+
+      while (
+        words.length &&
+        jobPhraseEdgeWords.has(words[words.length - 1])
+      ) {
+        words.pop();
+      }
+
+      return words.join(' ');
+    })
+    .filter(Boolean)
+    .filter(phrase => {
+      const words = phrase
+        .toLowerCase()
+        .replace(/-/g, ' ')
+        .replace(/[^a-z0-9+#\s]/g, ' ')
+        .split(/\s+/)
+        .filter(Boolean);
+
+      if (words.length < 2 || words.length > 6) return false;
+
+      const meaningfulWords = words.filter(
+        word =>
+          !jobStopWords.has(word) &&
+          !jobPhraseNoiseWords.has(word)
+      );
+
+      return meaningfulWords.length >= 2;
+    });
+
+  return [...new Set(nounPhrases)].slice(0, 30);
+}
+
+function resumeMatchesRequirement(resumeText, requirement) {
+  const normalizeJobLanguage = value =>
+    value
+      .toLowerCase()
+      .replace(/\bregulatory\b/g, 'regulation')
+      .replace(/\bregulations\b/g, 'regulation')
+      .replace(/\bguidelines\b/g, 'guideline')
+      .replace(/\bapplications\b/g, 'application')
+      .replace(/\bdecisions\b/g, 'decision')
+      .replace(/\bstatements\b/g, 'statement')
+      .replace(/\bprograms\b/g, 'program');
+
+  const normalizedResume = normalizeJobLanguage(resumeText);
+
+  const requirementWords = normalizeJobLanguage(requirement)
+    .replace(/[^a-z0-9+#&/\-\s]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter(word =>
+      word.length >= 3 &&
+      !jobStopWords.has(word) &&
+      !jobPhraseEdgeWords.has(word)
+    );
+
+  if (!requirementWords.length) return false;
+
+  const matchedWords = requirementWords.filter(word => {
+    const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    return new RegExp(
+      `(^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`,
+      'i'
+    ).test(normalizedResume);
+  });
+
+  if (requirementWords.length === 1) {
+    return matchedWords.length === 1;
+  }
+
+  const requiredMatches = Math.max(
+    2,
+    Math.ceil(requirementWords.length * 0.6)
+  );
+
+  return matchedWords.length >= requiredMatches;
+}
+
+function dedupeJobRequirements(requirements) {
+  const normalize = phrase =>
+    phrase
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\bstatements\b/g, 'statement')
+      .replace(/\bapplications\b/g, 'application')
+      .replace(/\bdecisions\b/g, 'decision')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  const kept = [];
+
+  for (const requirement of requirements) {
+    const words = normalize(requirement).split(' ').filter(Boolean);
+
+    const duplicateIndex = kept.findIndex(existing => {
+      const existingWords = normalize(existing).split(' ').filter(Boolean);
+      const existingSet = new Set(existingWords);
+      const currentSet = new Set(words);
+
+      const currentInsideExisting =
+        words.every(word => existingSet.has(word));
+
+      const existingInsideCurrent =
+        existingWords.every(word => currentSet.has(word));
+
+      return currentInsideExisting || existingInsideCurrent;
+    });
+
+    if (duplicateIndex === -1) {
+      kept.push(requirement);
+    } else {
+      const existingWordCount =
+        normalize(kept[duplicateIndex]).split(' ').length;
+
+      if (words.length > existingWordCount) {
+        kept[duplicateIndex] = requirement;
+      }
+    }
+  }
+
+return kept;
+}
+function analyzeResumeText(text, targetRole, jobDescription = '') {
   const trimmed = text.trim();
   const words = trimmed.split(/\s+/).filter(Boolean);
   const lines = trimmed.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
-  const targetSkills = resumeRoleProfiles[targetRole] || resumeRoleProfiles['General Technical'];
+  const targetSkills =
+    targetRole === 'Custom Job'
+      ? dedupeJobRequirements(extractJobPhrases(jobDescription)).slice(0, 15)
+      : resumeRoleProfiles[targetRole] || resumeRoleProfiles['General Technical'];
   const allSkills = Object.keys(resumeSkillAliases);
   const detectedSkills = allSkills.filter(skill => resumeHasSkill(trimmed, skill));
-  const matchedSkills = targetSkills.filter(skill => resumeHasSkill(trimmed, skill));
-  const missingSkills = targetSkills.filter(skill => !resumeHasSkill(trimmed, skill));
-  const metricMatches = trimmed.match(/(?:\$\s?\d[\d,.]*|\b\d+(?:\.\d+)?\s?(?:%|x|k|m|million|thousand|hours?|days?|weeks?|months?|years?)\b)/gi) || [];
+  const matchedSkills = targetSkills.filter(skill =>
+    targetRole === 'Custom Job'
+      ? resumeMatchesRequirement(trimmed, skill)
+      : resumeHasSkill(trimmed, skill)
+  );
+
+  const missingSkills = targetSkills.filter(skill =>
+    targetRole === 'Custom Job'
+      ? !resumeMatchesRequirement(trimmed, skill)
+      : !resumeHasSkill(trimmed, skill)
+  );
+  const metricMatches = trimmed.match(/(?:\$\s?\d[\d,.]*|\b(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\+?\s?(?:%|x|k|m|million|thousand|hours?|days?|weeks?|months?|years?)\b)/gi) || [];
   const actionLines = lines.filter(line => resumeActionVerbs.some(v => new RegExp(`^(?:[-*•]\\s*)?${v}\\b`, 'i').test(line)));
   const actionVerbMatches = resumeActionVerbs.filter(v =>
     new RegExp(`\\b${v}\\b`, 'i').test(trimmed)
@@ -285,22 +503,64 @@ function analyzeResumeText(text, targetRole) {
   const skillScore = Math.round(matchedSkills.length / Math.max(1, targetSkills.length) * 20);
   const metricsScore = Math.min(20, metricMatches.length * 4);
   const actionScore = Math.min(20, actionSignalCount * 4);
-  const score = Math.max(1, Math.min(100, lengthScore + sectionScore + skillScore + metricsScore + actionScore));
+  const score = targetRole === 'Custom Job'
+    ? Math.max(
+      1,
+      Math.min(
+        100,
+        Math.round(
+          (matchedSkills.length / Math.max(1, targetSkills.length)) * 50 +
+          Math.min(15, metricMatches.length * 3) +
+          Math.min(15, actionSignalCount * 3) +
+          Math.round((sectionCount / 4) * 10) +
+          (words.length >= 250 && words.length <= 1100 ? 10 : 5)
+        )
+      )
+    )
+    : Math.max(
+      1,
+      Math.min(
+        100,
+        lengthScore + sectionScore + skillScore + metricsScore + actionScore
+      )
+    );
 
   const strengths = [];
-  if (matchedSkills.length >= 6) strengths.push(`Strong technical alignment for ${targetRole}: ${matchedSkills.length} target skills detected.`);
-  else if (matchedSkills.length) strengths.push(`${matchedSkills.length} target-role skills are already visible in the resume.`);
+  if (matchedSkills.length >= 6) {
+    strengths.push(
+      targetRole === 'Custom Job'
+        ? `Strong job alignment: ${matchedSkills.length} job requirements detected in the resume.`
+        : `Strong technical alignment for ${targetRole}: ${matchedSkills.length} target skills detected.`
+    );
+  }
+  else if (matchedSkills.length) {
+    strengths.push(
+      targetRole === 'Custom Job'
+        ? `${matchedSkills.length} job requirements are already visible in the resume.`
+        : `${matchedSkills.length} target-role skills are already visible in the resume.`
+    );
+  };
   if (metricMatches.length >= 3) strengths.push(`${metricMatches.length} measurable results or scale indicators detected.`);
   if (actionSignalCount >= 3) strengths.push('Several lines begin with strong action-oriented language.');
   if (sections.experience && sections.skills && sections.education) strengths.push('Core resume sections are clearly represented.');
   if (!strengths.length) strengths.push('The resume provides enough material to start a focused revision pass.');
 
   const opportunities = [];
-  if (missingSkills.length) opportunities.push(`Add evidence for relevant skills you genuinely have but are not currently showing: ${missingSkills.slice(0, 6).join(', ')}${missingSkills.length > 6 ? '...' : ''}`);
+  if (missingSkills.length) {
+    opportunities.push(
+      targetRole === 'Custom Job'
+        ? `Add evidence for relevant job requirements you genuinely have but are not currently showing: ${missingSkills.slice(0, 6).join(', ')}${missingSkills.length > 6 ? '...' : ''}`
+        : `Add evidence for relevant skills you genuinely have but are not currently showing: ${missingSkills.slice(0, 6).join(', ')}${missingSkills.length > 6 ? '...' : ''}`
+    );
+  }
   if (metricMatches.length < 3) opportunities.push('Add measurable outcomes where possible: time saved, quality improvement, SLA, volume, accuracy, cost, or delivery speed.');
   if (actionSignalCount < 3) opportunities.push('Start more accomplishment bullets with clear action verbs such as Built, Automated, Improved, Deployed, or Resolved.');
   if (weakLines.length) opportunities.push(`Replace passive phrasing in ${weakLines.length} line${weakLines.length === 1 ? '' : 's'} such as “responsible for” with ownership + outcome language.`);
-  if (!sections.projects) opportunities.push('Consider a Projects section when technical projects provide stronger evidence than job titles alone.');
+  if (!sections.projects && targetRole !== 'Custom Job') {
+    opportunities.push(
+      'Consider a Projects section when technical projects provide stronger evidence than job titles alone.'
+    );
+  }
   if (words.length < 250) opportunities.push('The resume appears brief; make sure your strongest technical work and results are represented.');
   if (words.length > 1100) opportunities.push('The resume is text-heavy; prioritize the most role-relevant evidence and remove repetition.');
 
@@ -316,6 +576,8 @@ function analyzeResumeText(text, targetRole) {
 function ResumeReviewer() {
   const [targetRole, setTargetRole] = useState('Data Engineer');
   const [resumeText, setResumeText] = useState('');
+  const [jobTitle, setJobTitle] = useState('');
+  const [jobDescription, setJobDescription] = useState('');
   const [analysis, setAnalysis] = useState(null);
   const [fileName, setFileName] = useState('');
   const [fileError, setFileError] = useState('');
@@ -395,7 +657,9 @@ function ResumeReviewer() {
 
   function runAnalysis() {
     if (!resumeText.trim()) return;
-    setAnalysis(analyzeResumeText(resumeText, targetRole));
+    console.log('Custom job keywords:', extractJobKeywords(jobDescription));
+    console.log('Custom job phrases:', extractJobPhrases(jobDescription));
+    setAnalysis(analyzeResumeText(resumeText, targetRole, jobDescription));
   }
 
   function clearResume() { setResumeText(''); setAnalysis(null); setFileName(''); setFileError(''); }
@@ -403,10 +667,38 @@ function ResumeReviewer() {
   return <>
     <Header eyebrow="Career readiness" title="Resume Reviewer" subtitle="Review the evidence your resume presents for a target technical role. PrepForge analyzes locally in your browser and gives transparent, structured feedback." />
     <div className="resume-toolbar">
-      <label className="role-select"><span>Target role</span><select value={targetRole} onChange={e => { setTargetRole(e.target.value); setAnalysis(null) }}>{Object.keys(resumeRoleProfiles).map(role => <option key={role}>{role}</option>)}</select></label>
+      <label className="role-select"><span>Target role</span><select value={targetRole} onChange={e => { setTargetRole(e.target.value); setAnalysis(null) }}> <option value="Custom Job">Custom Job Description</option>{Object.keys(resumeRoleProfiles).map(role => <option key={role}>{role}</option>)}</select></label>
       <label className="upload-resume"><Layers3 size={18} /><span>{fileName || 'Upload resume (.PDF, .DOCX, .TXT, .MD)'}</span><input type="file" accept=".txt,.md,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={loadResumeFile} /></label>
       <button className="ghost" onClick={clearResume}>Clear</button>
     </div>
+    {targetRole === 'Custom Job' && (
+      <div className="custom-job-section">
+        <label>
+          <span>Job title</span>
+          <input
+            type="text"
+            value={jobTitle}
+            onChange={e => {
+              setJobTitle(e.target.value);
+              setAnalysis(null);
+            }}
+            placeholder="Example: Mortgage Underwriter"
+          />
+        </label>
+
+        <label>
+          <span>Job description</span>
+          <textarea
+            value={jobDescription}
+            onChange={e => {
+              setJobDescription(e.target.value);
+              setAnalysis(null);
+            }}
+            placeholder="Paste the full job description here..."
+          />
+        </label>
+      </div>
+    )}
     {fileError && <div className="resume-alert">{fileError}</div>}
     <div className="resume-layout">
       <section className="resume-editor-card">
@@ -418,16 +710,108 @@ function ResumeReviewer() {
 
       <section className="resume-results-card">
         {!analysis ? <div className="resume-empty"><NotebookPen size={36} /><h3>Ready when you are</h3><p>Paste your resume, choose a target role, and run the reviewer. You’ll get skill evidence, accomplishment signals, and concrete revision priorities.</p></div> : <>
-          <div className="resume-score-row"><div className="resume-score"><strong>{analysis.score}</strong><span>/100</span></div><div><span className="eyebrow">PrepForge readiness signal</span><h2>{targetRole}</h2><p>{analysis.matchedSkills.length} of {resumeRoleProfiles[targetRole].length} target skills detected in the resume text.</p></div></div>
-          <div className="resume-mini-stats"><div><strong>{analysis.detectedSkills.length}</strong><span>technical skills</span></div><div><strong>{analysis.metrics}</strong><span>measurable signals</span></div><div><strong>{analysis.actionLines}</strong><span>action-led lines</span></div><div><strong>{analysis.words}</strong><span>words</span></div></div>
+          <div className="resume-score-row"><div className="resume-score"><strong>{analysis.score}</strong><span>/100</span></div><div><span className="eyebrow">PrepForge readiness signal</span><h2>
+            {targetRole === 'Custom Job'
+              ? (jobTitle || 'Custom Job')
+              : targetRole}
+          </h2><p>
+              {targetRole === 'Custom Job'
+                ? `${analysis.matchedSkills.length} of ${analysis.matchedSkills.length + analysis.missingSkills.length} job requirements detected in the resume.`
+                : `${analysis.matchedSkills.length} of ${resumeRoleProfiles[targetRole].length} target skills detected in the resume text.`}
+            </p></div></div>
+          <div className="resume-mini-stats">
+            <div>
+              <strong>
+                {targetRole === 'Custom Job'
+                  ? analysis.matchedSkills.length
+                  : analysis.detectedSkills.length}
+              </strong>
+              <span>
+                {targetRole === 'Custom Job'
+                  ? 'job requirements matched'
+                  : 'technical skills'}
+              </span>
+            </div>
+
+            <div>
+              <strong>{analysis.metrics}</strong>
+              <span>measurable signals</span>
+            </div>
+
+            <div>
+              <strong>{analysis.actionLines}</strong>
+              <span>action-led lines</span>
+            </div>
+
+            <div>
+              <strong>{analysis.words}</strong>
+              <span>words</span>
+            </div>
+          </div>
         </>}
       </section>
     </div>
 
     {analysis && <>
       <div className="resume-panel-grid">
-        <section className="resume-panel"><span className="eyebrow">Evidence detected</span><h2>Technical skills</h2><div className="skill-cloud">{analysis.detectedSkills.length ? analysis.detectedSkills.map(skill => <span className="skill-chip matched" key={skill}>{skill}</span>) : <span className="muted">No technical skills from the current dictionary were detected.</span>}</div></section>
-        <section className="resume-panel"><span className="eyebrow">Evidence gaps</span><h2>Target skills not detected</h2><p className="muted small-copy">This does not mean you lack these skills. It means PrepForge did not find clear evidence for them in the pasted resume.</p><div className="skill-cloud">{analysis.missingSkills.length ? analysis.missingSkills.map(skill => <span className="skill-chip missing" key={skill}>{skill}</span>) : <span className="skill-chip matched">Strong role coverage</span>}</div></section>
+        <section className="resume-panel">
+          <span className="eyebrow">Evidence detected</span>
+
+          <h2>
+            {targetRole === 'Custom Job'
+              ? 'Job requirements detected'
+              : 'Technical skills'}
+          </h2>
+
+          <div className="skill-cloud">
+            {(targetRole === 'Custom Job'
+              ? analysis.matchedSkills
+              : analysis.detectedSkills
+            ).length ? (
+              (targetRole === 'Custom Job'
+                ? analysis.matchedSkills
+                : analysis.detectedSkills
+              ).map(skill => (
+                <span className="skill-chip matched" key={skill}>
+                  {skill}
+                </span>
+              ))
+            ) : (
+              <span className="muted">
+                {targetRole === 'Custom Job'
+                  ? 'No clear matches to the selected job requirements were detected yet.'
+                  : 'No technical skills from the current dictionary were detected.'}
+              </span>
+            )}
+          </div>
+        </section>
+
+        <section className="resume-panel">
+          <span className="eyebrow">Evidence gaps</span>
+          <h2>
+            {targetRole === 'Custom Job'
+              ? 'Job requirements not detected'
+              : 'Target skills not detected'}
+          </h2>
+
+          <p className="muted small-copy">
+            {targetRole === 'Custom Job'
+              ? 'This does not mean you lack these qualifications. It means PrepForge did not find clear evidence for these job requirements in the resume.'
+              : 'This does not mean you lack these skills. It means PrepForge did not find clear evidence for them in the pasted resume.'}
+          </p>
+
+          <div className="skill-cloud">
+            {analysis.missingSkills.length ? (
+              analysis.missingSkills.map(skill => (
+                <span className="skill-chip missing" key={skill}>
+                  {skill}
+                </span>
+              ))
+            ) : (
+              <span className="skill-chip matched">Strong role coverage</span>
+            )}
+          </div>
+        </section>
       </div>
       <div className="resume-panel-grid">
         <section className="resume-panel"><span className="eyebrow">What is working</span><h2>Strengths</h2><ul className="resume-list">{analysis.strengths.map(item => <li key={item}><CheckCircle2 size={17} /><span>{item}</span></li>)}</ul></section>
