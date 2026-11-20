@@ -11,6 +11,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import mammoth from 'mammoth';
 import nlp from 'compromise';
+import { supabase } from './supabaseClient';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -460,7 +461,7 @@ function dedupeJobRequirements(requirements) {
     }
   }
 
-return kept;
+  return kept;
 }
 function analyzeResumeText(text, targetRole, jobDescription = '') {
   const trimmed = text.trim();
@@ -1066,6 +1067,26 @@ function TravelersPrep() {
   const today = new Date().toLocaleDateString('en-US', {
     weekday: 'long'
   });
+  const [liveQuestions, setLiveQuestions] = useState([]);
+
+  useEffect(() => {
+    async function loadInterviewQuestions() {
+      const { data, error } = await supabase
+        .from('interview_questions')
+        .select('*')
+        .order('id', { ascending: true });
+
+      if (error) {
+        console.error('Supabase interview questions error:', error);
+        return;
+      }
+
+      setLiveQuestions(data || []);
+      console.log('Supabase interview questions:', data);
+    }
+
+    loadInterviewQuestions();
+  }, []);
 
   const dailyQuestion =
     travelersQuestions.find(q => q.day === today) ||
@@ -1118,6 +1139,38 @@ function TravelersPrep() {
           <li>Thursday — System Design & Incident Resolution</li>
           <li>Saturday — Behavioral & Mock Interviews</li>
         </ul>
+        <div style={{ marginTop: 24 }}>
+          <h3>Live Interview Question Bank</h3>
+          <p>{liveQuestions.length} questions loaded from Supabase.</p>
+
+          {liveQuestions.map((q) => (
+            <div
+              key={q.id}
+              className="panel"
+              style={{ padding: 16, marginTop: 12 }}
+            >
+              <p>
+                <strong>{q.track}</strong>
+                {q.level ? ` • ${q.level}` : ''}
+                {q.difficulty ? ` • ${q.difficulty}` : ''}
+              </p>
+
+              <small>{q.category}</small>
+
+              <h4 style={{ marginTop: 10 }}>
+                {q.question}
+              </h4>
+
+              <details style={{ marginTop: 10 }}>
+                <summary style={{ cursor: 'pointer' }}>
+                  Reveal Suggested Answer
+                </summary>
+
+                <p>{q.answer}</p>
+              </details>
+            </div>
+          ))}
+        </div>
 
 
 
